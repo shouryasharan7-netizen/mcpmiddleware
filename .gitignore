@@ -1,0 +1,38 @@
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local database, audit, and application logs
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+audit.jsonl
+gateway.sqlite3
+*.log
+
+# Local test and scratch artifacts
+work/venv/
+work/*.log
+work/*.sqlite
+work/*.sqlite3
+work/*.jsonl
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

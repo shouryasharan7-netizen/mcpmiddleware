@@ -1,0 +1,10 @@
+aiohttp>=3.10,<4
+PyJWT[crypto]>=2.10,<3
+redis>=5,<9
+opentelemetry-api>=1.28
+opentelemetry-sdk>=1.28
+opentelemetry-exporter-otlp-proto-http>=1.28
+jsonschema>=4.20
+PyYAML>=6.0
+grpcio>=1.60
+grpcio-reflection>=1.60
