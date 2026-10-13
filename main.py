@@ -27,6 +27,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from adapters import call_grpc, call_rest, discover_grpc, openapi_operations
 from security import redact_tree
+from pipeline import get_pipeline, RequestContext, ResponseContext, ErrorContext
+from guardrails import GuardrailsMiddleware
+from telemetry import TelemetryMiddleware
 
 DB_PATH = os.getenv("MCP_GATEWAY_DB", "gateway.sqlite3")
 AUDIT_PATH = os.getenv("MCP_GATEWAY_AUDIT", "audit.jsonl")
@@ -334,7 +337,36 @@ async def mcp_post(request):
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
         return jsonrpc_error(message if isinstance(message, dict) else {}, -32600, "invalid JSON-RPC request", 400)
     method, params = message["method"], message.get("params", {})
-    if method == "tools/list": return await tools_list(request, message, ident)
+    
+    # Create request context for middleware pipeline
+    gateway_sid = request.headers.get("Mcp-Session-Id")
+    request_context = RequestContext(
+        request=message,
+        identity=ident,
+        session_id=gateway_sid,
+        start_time=time.perf_counter()
+    )
+    
+    # Process request through middleware pipeline (guardrails, telemetry, etc.)
+    pipeline = get_pipeline()
+    processed_message, pipeline_error = await pipeline.process_request(message, request_context)
+    
+    if pipeline_error:
+        # Middleware rejected the request (e.g., guardrails blocked a tool call)
+        return web.json_response(pipeline_error, status=200)
+    
+    if method == "tools/list": 
+        response = await tools_list(request, processed_message, ident)
+        # Process non-streaming JSON responses through pipeline
+        if hasattr(response, 'json') and not response.headers.get('Content-Type', '').startswith('text/event-stream'):
+            try:
+                response_dict = await response.json()
+                response_context = ResponseContext(response=response_dict, request_context=request_context)
+                processed_response = await pipeline.process_response(response_dict, response_context)
+                return web.json_response(processed_response, status=response.status)
+            except:
+                return response
+        return response
     if method == "initialize":
         all_tool_rows = tool_rows()
         rows = [row for row in all_tool_rows if row["transport"] == "streamable-http"]
@@ -378,23 +410,25 @@ async def mcp_post(request):
             upstream.release()
         return web.Response(status=202, headers={"Mcp-Session-Id": gateway_sid} if gateway_sid else {})
     if method == "tools/call":
-        if not isinstance(params, dict) or not isinstance(params.get("name"), str): return jsonrpc_error(message, -32602, "invalid tool call")
+        if not isinstance(params, dict) or not isinstance(params.get("name"), str): return jsonrpc_error(processed_message, -32602, "invalid tool call")
         name = params["name"]
+        # Update request context with tool name for telemetry
+        request_context.metadata["tool_name"] = name
         row = next((r for r in tool_rows() if r["name"] == name and r["transport"] in ("streamable-http", "rest", "grpc")), None)
         if not row or not (set(ident["roles"]) & set(json.loads(row["write_roles"]))):
             safe_args = redact_tree(params.get("arguments", {}), {})
             await audit(request.app, ident, method, name, safe_args, "deny", "tool unavailable or role denied")
-            return jsonrpc_error(message, -32003, "tool unavailable or forbidden")
+            return jsonrpc_error(processed_message, -32003, "tool unavailable or forbidden")
         args = params.get("arguments", {})
-        if not isinstance(args, dict): return jsonrpc_error(message, -32602, "tool arguments must be an object")
+        if not isinstance(args, dict): return jsonrpc_error(processed_message, -32602, "tool arguments must be an object")
         input_redactions = {}
         safe_args = redact_tree(args, input_redactions)
         if INJECTION.search(json.dumps(args, ensure_ascii=False)):
             await audit(request.app, ident, method, name, safe_args, "deny", "payload inspection rule matched", input_redactions)
-            return jsonrpc_error(message, -32010, "payload blocked by inspection policy")
+            return jsonrpc_error(processed_message, -32010, "payload blocked by inspection policy")
         endpoint = session.get("routes", {}).get(name)
         if not endpoint or (row["transport"] == "streamable-http" and endpoint not in session["backends"]):
-            return jsonrpc_error(message, -32001, "tool is not part of this MCP session; reinitialize the session", 409)
+            return jsonrpc_error(processed_message, -32001, "tool is not part of this MCP session; reinitialize the session", 409)
         if row["transport"] in ("rest", "grpc"):
             try:
                 config = json.loads(row["adapter_config"])
@@ -414,17 +448,23 @@ async def mcp_post(request):
                 content = json.dumps(result, ensure_ascii=False)
                 response_result = {"content": [{"type": "text", "text": content}], "structuredContent": result}
                 if error: response_result["isError"] = True
-                response = web.json_response({"jsonrpc": "2.0", "id": message.get("id"), "result": response_result})
+                response_dict = {"jsonrpc": "2.0", "id": message.get("id"), "result": response_result}
+                
+                # Process through middleware pipeline (for truncation, etc.)
+                response_context = ResponseContext(response=response_dict, request_context=request_context)
+                processed_response = await pipeline.process_response(response_dict, response_context)
+                
+                response = web.json_response(processed_response)
                 if gateway_sid: response.headers["Mcp-Session-Id"] = gateway_sid
                 return response
             except Exception as exc:
                 await audit(request.app, ident, method, name, safe_args, "error", type(exc).__name__, input_redactions)
-                return jsonrpc_error(message, -32000, "API adapter invocation failed", 502)
+                return jsonrpc_error(processed_message, -32000, "API adapter invocation failed", 502)
         try:
             with TRACER.start_as_current_span("mcp.tools.call") as span:
                 span.set_attribute("mcp.tool.name", name)
                 span.set_attribute("enduser.id", ident["sub"])
-                upstream_message = dict(message)
+                upstream_message = dict(processed_message)
                 upstream_message["params"] = dict(params, name=session.get("upstream_names", {}).get(name, name), arguments=safe_args)
                 upstream = await relay(request, endpoint, upstream_message, session["backends"].get(endpoint), row["auth_env"])
                 span.set_attribute("http.response.status_code", upstream.status)
@@ -434,15 +474,17 @@ async def mcp_post(request):
                         input_redactions)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             await audit(request.app, ident, method, name, safe_args, "error", type(exc).__name__, input_redactions)
-            return jsonrpc_error(message, -32000, "downstream tool unavailable", 502)
+            return jsonrpc_error(processed_message, -32000, "downstream tool unavailable", 502)
         dlp_context = {"identity": ident, "method": method, "tool": name}
         return await stream_response(request, upstream, gateway_sid, dlp_context)
     else:
         endpoint = next(iter(session["backends"]), None) or next((r["endpoint"] for r in tool_rows() if r["transport"] == "streamable-http"), None)
-        if not endpoint: return jsonrpc_error(message, -32000, "no downstream MCP server registered", 503)
-        upstream = await relay(request, endpoint, message, session["backends"].get(endpoint), session.get("backend_auth", {}).get(endpoint))
+        if not endpoint: return jsonrpc_error(processed_message, -32000, "no downstream MCP server registered", 503)
+        upstream = await relay(request, endpoint, processed_message, session["backends"].get(endpoint), session.get("backend_auth", {}).get(endpoint))
     if method == "initialize" and upstream.headers.get("Mcp-Session-Id"):
         session["backends"][endpoint] = upstream.headers["Mcp-Session-Id"]
+    # For streaming responses, we skip response processing through pipeline (complex to intercept SSE)
+    # Request-level guardrails already applied
     return await stream_response(request, upstream, gateway_sid, {"identity": ident, "method": "mcp.stream", "tool": "session"})
 
 
@@ -820,6 +862,12 @@ async def startup(app):
     app["logger"] = __import__("logging").getLogger("gateway")
     database().close()
     app["audit_worker"] = asyncio.create_task(audit_delivery_worker(app)) if os.getenv("MCP_AUDIT_WEBHOOK_URL") else None
+    
+    # Initialize middleware pipeline
+    pipeline = get_pipeline()
+    pipeline.use(TelemetryMiddleware())
+    pipeline.use(GuardrailsMiddleware())
+    app["logger"].info("Middleware pipeline initialized with Telemetry and Guardrails")
 
 
 async def cleanup(app):

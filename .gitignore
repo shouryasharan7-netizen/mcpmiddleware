@@ -12,6 +12,8 @@ env/
 !.env.example
 *.pem
 *.key
+claude_desktop_config.json
+!claude_desktop_config.example.json
 
 # Local database, audit, and application logs
 *.sqlite

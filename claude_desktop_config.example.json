@@ -1,0 +1,20 @@
+{
+  "_comment": "Example Claude Desktop configuration for MCP Gateway with guardrails enabled. Update /path/to/mcpmiddleware to your actual installation path.",
+  "mcpServers": {
+    "secure-gateway": {
+      "command": "python",
+      "args": [
+        "/path/to/mcpmiddleware/main.py"
+      ],
+      "env": {
+        "MCP_GATEWAY_HOST": "127.0.0.1",
+        "MCP_GATEWAY_PORT": "8080",
+        "MCP_ALLOW_IN_MEMORY_SESSIONS": "true",
+        "MCP_BLOCKED_TOOLS": "[\"dangerous_tool\", \"delete_database\"]",
+        "MCP_BLOCKED_PATTERNS": "[\"rm -rf\", \"sudo \", \"docker rm\", \"kubectl delete\"]",
+        "MCP_PROTECTED_PATHS": "[\"/etc\", \"/usr\", \"/var\", \"/home\", \"/root\"]",
+        "MCP_MAX_RESPONSE_SIZE": "2097152"
+      }
+    }
+  }
+}

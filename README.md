@@ -4,6 +4,10 @@ An authenticated entry point for MCP servers and legacy APIs. The gateway mainta
 
 ## Features
 
+- **Pluggable Middleware Pipeline:** Extensible interceptor pattern with beforeRequest, afterResponse, and onError hooks for custom logic.
+- **Guardrails & Tool-Call Interceptor:** Blocklist/allowlist for tool names, pattern matching for destructive commands (e.g., `rm -rf`, `sudo`), and protected path detection.
+- **Output Truncation:** Automatic truncation of oversized responses with configurable size limits to prevent context overflow.
+- **Lightweight Telemetry:** Logs tool execution latency, method names, and packet byte sizes to stderr or configurable logger.
 - **DLP at the gateway boundary:** scans JSON arguments, returned values, and SSE event data. It redacts common credentials and private keys, email addresses, phone numbers, SSNs, payment card numbers, sensitive-key values, and organization-defined phrases or regex patterns. Redacted request arguments are forwarded to the backend; sanitized payloads are used for audit records.
 - **gRPC reflection adapter:** discovers unary methods from a reflection-enabled gRPC service and exposes them as MCP tools. TLS is enabled by default. Streaming RPC methods are currently skipped.
 - **OpenAPI REST adapter:** imports supported operations from an OpenAPI 3.x document and builds schema-validated MCP tool definitions.
@@ -11,6 +15,70 @@ An authenticated entry point for MCP servers and legacy APIs. The gateway mainta
 - **OIDC, RBAC, Redis session affinity, SSE, WebSockets, OTLP, and Splunk HEC audit delivery.**
 
 DLP uses deterministic patterns rather than an NER model. It cannot guarantee detection of unknown sensitive data; configure and evaluate organization-specific patterns before use with sensitive workloads.
+
+## Architecture
+
+```mermaid
+graph TD
+    Client[Claude Desktop / MCP Client]
+    Gateway[MCP Gateway]
+    Pipeline[Middleware Pipeline]
+    Telemetry[Telemetry Middleware]
+    Guardrails[Guardrails Middleware]
+    Custom[Custom Middleware]
+    Auth[OIDC Auth]
+    Redis[Redis Sessions]
+    Registry[SQLite Registry]
+    Audit[SQLite Audit]
+    MCP1[MCP Server 1]
+    MCP2[MCP Server 2]
+    REST[REST API]
+    gRPC[gRPC Service]
+
+    Client -->|JSON-RPC| Gateway
+    Gateway --> Pipeline
+    Pipeline --> Telemetry
+    Telemetry --> Guardrails
+    Guardrails --> Custom
+    Custom --> Auth
+    Auth --> Redis
+    Auth --> Registry
+    Custom --> MCP1
+    Custom --> MCP2
+    Custom --> REST
+    Custom --> gRPC
+    Gateway --> Audit
+```
+
+**Request Flow:**
+1. Client sends JSON-RPC request to Gateway
+2. Request passes through Middleware Pipeline (Telemetry → Guardrails → Custom)
+3. Guardrails check tool names, arguments, and patterns
+4. Auth validates OIDC token and RBAC roles
+5. Request forwarded to appropriate backend (MCP, REST, gRPC)
+6. Response passes back through pipeline (Custom → Guardrails → Telemetry)
+7. Guardrails truncate oversized responses
+8. Telemetry logs latency and metrics
+9. Audit record written to SQLite
+
+## Quickstart
+
+```bash
+# Install dependencies
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+
+# Configure minimal settings (for local development)
+export MCP_ALLOW_IN_MEMORY_SESSIONS=true
+export MCP_GATEWAY_HOST=127.0.0.1
+export MCP_GATEWAY_PORT=8080
+
+# Run the gateway
+python main.py
+```
+
+The gateway will start on `http://127.0.0.1:8080` with middleware pipeline enabled (Telemetry + Guardrails).
 
 ## Run locally
 
@@ -26,6 +94,13 @@ export MCP_OIDC_AUDIENCE="mcp-gateway"
 export MCP_OIDC_JWKS_URI="https://identity.example/.well-known/jwks.json"
 export MCP_ROLE_MAP='{"mcp.admin":["Gateway-Admins"],"mcp.engineer":["Engineering"]}'
 export MCP_REDIS_URL="redis://localhost:6379/0"
+
+# Optional: Configure guardrails
+export MCP_BLOCKED_TOOLS='["dangerous_tool", "delete_database"]'
+export MCP_BLOCKED_PATTERNS='["rm -rf", "sudo ", "docker rm", "kubectl delete"]'
+export MCP_PROTECTED_PATHS='["/etc", "/usr", "/var", "/home", "/root"]'
+export MCP_MAX_RESPONSE_SIZE="2097152"  # 2MB
+
 python main.py
 ```
 
@@ -130,6 +205,66 @@ The gateway pod imports optional keys from `gateway-secrets` as environment vari
 | `MCP_DLP_SECRET_PHRASES`, `MCP_DLP_CUSTOM_PATTERNS` | Extra DLP phrases and regex rules. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | OTLP export endpoint and service identity. |
 | `MCP_AUDIT_WEBHOOK_URL`, `MCP_SPLUNK_HEC_TOKEN` | Splunk HEC audit delivery. |
+| `MCP_BLOCKED_TOOLS` | JSON array of tool names to block (guardrails). |
+| `MCP_ALLOWED_TOOLS` | JSON array of allowed tool names (if set, blocks all others). |
+| `MCP_BLOCKED_PATTERNS` | JSON array of regex patterns to block in tool arguments. |
+| `MCP_PROTECTED_PATHS` | JSON array of filesystem paths to protect from tool access. |
+| `MCP_MAX_RESPONSE_SIZE` | Maximum response size in bytes before truncation (default: 2MB). |
+| `MCP_MAX_TOKENS` | Optional token limit for response truncation (experimental). |
+
+## Custom Middleware
+
+To add custom middleware, create a class implementing the `Middleware` interface:
+
+```python
+from pipeline import Middleware, RequestContext, ResponseContext, ErrorContext
+from pipeline import get_pipeline
+
+class MyCustomMiddleware(Middleware):
+    async def before_request(self, request, context):
+        # Modify or reject request
+        if "restricted" in request.get("method", ""):
+            return None  # Reject
+        return request
+
+    async def after_response(self, response, context):
+        # Modify response
+        return response
+
+    async def on_error(self, error, context):
+        # Handle errors
+        return None
+
+# Register in main.py startup
+pipeline = get_pipeline()
+pipeline.use(MyCustomMiddleware())
+```
+
+## Claude Desktop Configuration
+
+Example configuration for connecting Claude Desktop to the gateway (see `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "secure-gateway": {
+      "command": "python",
+      "args": ["/path/to/mcpmiddleware/main.py"],
+      "env": {
+        "MCP_GATEWAY_HOST": "127.0.0.1",
+        "MCP_GATEWAY_PORT": "8080",
+        "MCP_ALLOW_IN_MEMORY_SESSIONS": "true",
+        "MCP_BLOCKED_TOOLS": "[\"dangerous_tool\", \"delete_database\"]",
+        "MCP_BLOCKED_PATTERNS": "[\"rm -rf\", \"sudo \", \"docker rm\", \"kubectl delete\"]",
+        "MCP_PROTECTED_PATHS": "[\"/etc\", \"/usr\", \"/var\", \"/home\", \"/root\"]",
+        "MCP_MAX_RESPONSE_SIZE": "2097152"
+      }
+    }
+  }
+}
+```
+
+Place this in your Claude Desktop settings (`~/.config/Claude/claude_desktop_config.json` on Linux/Mac or `%APPDATA%\Claude\claude_desktop_config.json` on Windows), updating the path to point to your installation.
 
 ## Integration smoke check
 
