@@ -1,5 +1,10 @@
 # Secure MCP Middleware Gateway
 
+![Tests](https://img.shields.io/badge/tests-22%20passing-success)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![MCP](https://img.shields.io/badge/MCP-2025--03--26-purple)
+
 An authenticated entry point for MCP servers and legacy APIs. The gateway maintains a registry, filters tool discovery and execution by role, routes MCP sessions through Redis, and records execution audit fingerprints. It also virtualizes REST and gRPC APIs as MCP tools and applies deterministic DLP redaction to request and response payloads.
 
 ## Features
@@ -265,6 +270,18 @@ Example configuration for connecting Claude Desktop to the gateway (see `claude_
 ```
 
 Place this in your Claude Desktop settings (`~/.config/Claude/claude_desktop_config.json` on Linux/Mac or `%APPDATA%\Claude\claude_desktop_config.json` on Windows), updating the path to point to your installation.
+
+## Changelog
+
+### v1.1.0 (2025-01-13)
+- ✨ Add pluggable middleware pipeline with beforeRequest/afterResponse/onError hooks
+- ✨ Implement guardrails with tool blocklist/allowlist and pattern matching
+- ✨ Add output truncation to prevent context overflow
+- ✨ Add lightweight telemetry logging (latency, packet sizes, method names)
+- ✨ Add comprehensive unit tests (22 tests passing)
+- 📝 Update README with architecture diagram and quickstart
+- 📝 Add Claude Desktop configuration example
+- 🔧 Integrate pipeline into main.py with zero breaking changes
 
 ## Integration smoke check
 
