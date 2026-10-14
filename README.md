@@ -5,6 +5,8 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![MCP](https://img.shields.io/badge/MCP-2025--03--26-purple)
 
+🚀 **New**: Try it in 5 minutes with [Docker Compose](QUICKSTART.md#option-1-docker-compose-recommended---easiest)!
+
 An authenticated entry point for MCP servers and legacy APIs. The gateway maintains a registry, filters tool discovery and execution by role, routes MCP sessions through Redis, and records execution audit fingerprints. It also virtualizes REST and gRPC APIs as MCP tools and applies deterministic DLP redaction to request and response payloads.
 
 ## Features
