@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # Redis for session storage
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # MCP Gateway with guardrails
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Redis configuration
+      - MCP_REDIS_URL=redis://redis:6379/0
+      - MCP_SESSION_TTL_SECONDS=3600
+      
+      # Guardrails configuration
+      - MCP_BLOCKED_PATTERNS=["rm -rf", "sudo ", "docker rm", "kubectl delete"]
+      - MCP_PROTECTED_PATHS=["/etc", "/usr", "/var", "/home", "/root"]
+      - MCP_MAX_RESPONSE_SIZE=2097152
+      
+      # Local development mode (skip OIDC for testing)
+      - MCP_ALLOW_IN_MEMORY_SESSIONS=true
+      
+      # Logging
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./gateway.sqlite3:/app/gateway.sqlite3
+      - ./audit.jsonl:/app/audit.jsonl
+    restart: unless-stopped
+
+  # Optional: Reference MCP server for testing
+  # Uncomment to test with a real MCP server
+  # mcp-server:
+  #   image: mcp-server:latest
+  #   ports:
+  #     - "9000:9000"
+  #   environment:
+  #     - MCP_SERVER_PORT=9000
+
+networks:
+  default:
+    name: mcp-network
